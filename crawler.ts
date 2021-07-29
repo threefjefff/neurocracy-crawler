@@ -5,7 +5,9 @@ import {CookieJar} from 'tough-cookie';
 import { parse, HTMLElement } from 'node-html-parser';
 import * as htmlEntities from 'html-entities';
 import { readFileSync, writeFileSync } from 'fs';
-import {difference, indexOf, uniq} from 'lodash';
+import {difference, groupBy, indexOf, map, union, uniq} from 'lodash';
+import {writeToPath, writeToStream} from "fast-csv";
+import * as fs from "fs";
 
 dotenv.config({path: 'config.env'});
 
@@ -13,7 +15,6 @@ console.log(process.env.OMNIPEDIA_DATE);
 
 const client = axios.create({withCredentials:true});
 cookieJarSupport(client);
-
 
 interface OmniLink {
   href: string;
@@ -49,8 +50,17 @@ const crawl = async (): Promise<void> => {
     console.log('Pulling the main page');
     const hovers = await crawlPage(`/wiki/${omniDate}/Main_Page`, omniDate);
 
-    console.log(visitedPages);
-    console.log(hovers);
+    //Making an assumption that highlights don't change. Not seen a place where the highlight changes between terms so far.
+    const groupedHovers = map(groupBy(hovers, 'highlight'), (group) => {
+      return {
+        highlight: group[0].highlight,
+        body: group[0].body,
+        pages: uniq(group.map(articles => articles.page))
+      }
+    });
+
+    await createHoversCSV(groupedHovers);
+    createLinksFile(visitedPages);
   } catch (e) {
     console.log(e);
   } finally {
@@ -82,7 +92,7 @@ const crawlPage = async (page: string, omniDate: string): Promise<OmniHover[]> =
   foundLinks = difference(uniq(foundLinks), visitedPages);
   for(const link of foundLinks) {
     const childHovers = await crawlPage(link, omniDate);
-    hovers = [...hovers, ...childHovers];
+    hovers = union(hovers, childHovers);
   }
   return hovers;
 }
@@ -95,7 +105,7 @@ const parseAnchor = (a: HTMLElement) : OmniLink | OmniHoverInfo | undefined => {
     }
   } else if(a.getAttribute('data-omnipedia-attached-data-title')) {
     return {
-      highlight: a.getAttribute('data-omnipedia-attached-data-title'),
+      highlight: htmlEntities.decode(a.getAttribute('data-omnipedia-attached-data-title')),
       body: htmlEntities.decode(a.getAttribute('data-omnipedia-attached-data-content'))
     }
   }
@@ -103,6 +113,27 @@ const parseAnchor = (a: HTMLElement) : OmniLink | OmniHoverInfo | undefined => {
 
 const isContentLink = (a: OmniLink, omniDate: string): boolean => {
   return a.href?.includes(omniDate) && !a.href?.includes('Main_Page')
+}
+
+const createHoversCSV = (data) => {
+  return new Promise<void>((resolve, reject) => {
+    const outPath = `./${process.env.OMNIPEDIA_DATE.replace(/\//g,`_`)}__hovers.csv`;
+    const ws = fs.createWriteStream(outPath);
+    ws.on('error', reject);
+    ws.on('finish', () => {
+      console.log(`Finished writing hovers to ${outPath}`);
+      resolve();
+    });
+    writeToStream(ws, data, {headers: ['highlight', 'body', 'pages'], delimiter: '\t'})
+      .on('error', err => reject(err))
+      .on('finish', () => ws.end());
+  });
+}
+
+const createLinksFile = (data) => {
+  const outPath = `./${process.env.OMNIPEDIA_DATE.replace(/\//g,`_`)}__links.csv`;
+  fs.writeFileSync(outPath, data.join('\n'));
+  console.log(`Finished writing links to ${outPath}`);
 }
 
 (async () => await crawl())();

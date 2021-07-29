@@ -8,6 +8,7 @@
     "axios": "^0.21.1",
     "axios-cookiejar-support": "^1.0.1",
     "dotenv": "^10.0.0",
+    "fast-csv": "^4.3.6",
     "html-entities": "^2.3.2",
     "lodash": "^4.17.21",
     "node": "^16.5.0",
