@@ -1,12 +1,12 @@
 import * as dotenv from 'dotenv';
-import axios, {AxiosResponse} from 'axios';
+import axios from 'axios';
 import { default as cookieJarSupport} from 'axios-cookiejar-support';
 import {CookieJar} from 'tough-cookie';
 import { parse, HTMLElement } from 'node-html-parser';
 import * as htmlEntities from 'html-entities';
 import { readFileSync, writeFileSync } from 'fs';
 import {difference, groupBy, indexOf, map, union, uniq} from 'lodash';
-import {writeToPath, writeToStream} from "fast-csv";
+import {writeToStream} from "fast-csv";
 import * as fs from "fs";
 
 dotenv.config({path: 'config.env'});
@@ -38,13 +38,15 @@ let visitedPages: string[] = []
 const crawl = async (): Promise<void> => {
   let jar: CookieJar;
   try {
-    jar = CookieJar.fromJSON(readFileSync('cookie.jar', {encoding: 'utf-8', flag: 'f'}));
+    jar = CookieJar.fromJSON(readFileSync('cookie.jar', {encoding: 'utf-8'}));
   } catch (e) {
+    console.log(`Can't find cookie jar, creating a fresh one`);
+    console.log(e);
     jar = new CookieJar();
   }
   client.defaults.jar = jar;
   try {
-    await login(); //Can't hurt to try. If it fails, we'll fall back to cookiejar anyways
+    await login(jar);
     const omniDate = process.env.OMNIPEDIA_DATE;
     client.defaults.baseURL = 'https://omnipedia.app/'
     console.log('Pulling the main page');
@@ -62,14 +64,24 @@ const crawl = async (): Promise<void> => {
     await createHoversCSV(groupedHovers);
     createLinksFile(visitedPages);
   } catch (e) {
-    console.log(e);
+    console.log(e.message);
+    console.log('If this is a 404, somethings likely gone wrong logging you in')
+    console.log('520 is cause Cloudflare doesnt like it when you spam requests lots of times in a row. Usually we get away with this cause it takes time to consume a page!')
   } finally {
     writeFileSync('cookie.jar', JSON.stringify(jar.toJSON()));
   }
 }
 
-const login = async (): Promise<void> => {
+const login = async (jar: CookieJar): Promise<void> => {
   try {
+    const omniCookies = await jar.getCookies('https://omnipedia.app/');
+    const expiry = omniCookies.filter(cookie => cookie.key.startsWith('SSESS')).map(cookie => cookie.expires);
+    if(expiry.length > 0){
+      const exp = expiry[0];
+      if(exp === 'Infinity') return; //The cookie will never expire. You're immortal!
+      if(Date.now() < exp.getTime()) return; //The cookie hasn't expired yet, you should be good to go.
+    }
+    console.log('Cookie not found, or expired. Fetching a new one.')
     await client.get(process.env.LOGIN_LINK);
   } catch (e){
     console.log(e);
