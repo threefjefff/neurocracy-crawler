@@ -5,7 +5,7 @@ import {CookieJar} from 'tough-cookie';
 import { parse, HTMLElement } from 'node-html-parser';
 import * as htmlEntities from 'html-entities';
 import { readFileSync, writeFileSync } from 'fs';
-import {difference, uniq} from 'lodash';
+import {difference, indexOf, uniq} from 'lodash';
 
 dotenv.config({path: 'config.env'});
 
@@ -19,12 +19,16 @@ interface OmniLink {
   href: string;
 }
 
-interface OmniHover {
+interface OmniHover extends OmniHoverInfo {
+  page: string;
+}
+
+interface OmniHoverInfo {
   highlight: string;
   body: string;
 }
 
-const isOmniLink = (a: OmniLink | OmniHover): a is OmniLink  => {
+const isOmniLink = (a: OmniLink | OmniHoverInfo): a is OmniLink  => {
   return (<OmniLink>a).href !== undefined;
 }
 
@@ -43,9 +47,10 @@ const crawl = async (): Promise<void> => {
     const omniDate = process.env.OMNIPEDIA_DATE;
     client.defaults.baseURL = 'https://omnipedia.app/'
     console.log('Pulling the main page');
-    const [hover, links] = await crawlPage(`/wiki/${omniDate}/Main_Page`, omniDate);
+    const hovers = await crawlPage(`/wiki/${omniDate}/Main_Page`, omniDate);
 
-    //console.log(foundPages);
+    console.log(visitedPages);
+    console.log(hovers);
   } catch (e) {
     console.log(e);
   } finally {
@@ -60,30 +65,29 @@ const login = async (): Promise<void> => {
     console.log(e);
   }
 }
-const crawlPage = async (page: string, omniDate: string): Promise<[OmniHover[], string[]]> => {
+const crawlPage = async (page: string, omniDate: string): Promise<OmniHover[]> => {
+  if(indexOf(visitedPages, page) > 0){
+    //Shortcircuit visited pages
+    return [];
+  }
   console.log(`Fetching ${page}`);
   const result = await client.get(page);
   visitedPages.push(page);
   const pageData = parse(result.data);
-  //TODO How come we're hitting visited pages over and over?
-  //const page = parse(fs.readFileSync('main-page.html', {encoding: 'utf8'}));
   const content = pageData.querySelectorAll('a').map(a => parseAnchor(a)).filter(a => a)
-  const hover = content.filter(a => !isOmniLink(a)).map(a => <OmniHover>a);
+  let hovers = content.filter(a => !isOmniLink(a)).map(a => <OmniHover>{...a, page});
   let foundLinks = content.filter(a => isOmniLink(a))
     .filter(a => isContentLink(<OmniLink>a, omniDate))
     .map(a => (<OmniLink>a).href);
   foundLinks = difference(uniq(foundLinks), visitedPages);
-  console.log({visited: visitedPages, visitable: foundLinks});
   for(const link of foundLinks) {
-   const [ch, cl] = await crawlPage(link, omniDate);
-   const diff = difference(cl, visitedPages);
-   console.log(diff);
-   foundLinks.push(...diff);
+    const childHovers = await crawlPage(link, omniDate);
+    hovers = [...hovers, ...childHovers];
   }
-  return [hover , foundLinks];
+  return hovers;
 }
 
-const parseAnchor = (a: HTMLElement) : OmniLink | OmniHover | undefined => {
+const parseAnchor = (a: HTMLElement) : OmniLink | OmniHoverInfo | undefined => {
   const link = a.getAttribute('href');
   if(link){
     return {
