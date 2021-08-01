@@ -9,5 +9,7 @@ This is a crawler for Neurocracy that starts at the home screen and works it's w
 - Enable agreement preferences (Colloid hiding)
 
 ## Config
-- LOGIN_LINK - login link from omnipedia email.
+- OMNI_USERNAME - Your username to log in to omnipedia
+- OMNI_PASSWORD - Your password to log in to omnipedia. 
+  - Note: This isn't stored anywhere, and used exclusively to get a token when the cookie is stale. You can see this for yourself in the `login()` method!
 - OMNIPEDIA_DATE - Date to select the main page from.

@@ -44,11 +44,11 @@ const crawl = async (): Promise<void> => {
     console.log(e);
     jar = new CookieJar();
   }
+  client.defaults.baseURL = 'https://omnipedia.app/'
   client.defaults.jar = jar;
   try {
     await login(jar);
     const omniDate = process.env.OMNIPEDIA_DATE;
-    client.defaults.baseURL = 'https://omnipedia.app/'
     console.log('Pulling the main page');
     const hovers = await crawlPage(`/wiki/${omniDate}/Main_Page`, omniDate);
 
@@ -82,7 +82,7 @@ const login = async (jar: CookieJar): Promise<void> => {
       if(Date.now() < exp.getTime()) return; //The cookie hasn't expired yet, you should be good to go.
     }
     console.log('Cookie not found, or expired. Fetching a new one.')
-    await client.get(process.env.LOGIN_LINK);
+    await client.post('/user/login', new URLSearchParams({name: process.env.OMNI_USERNAME, pass: process.env.OMNI_PASSWORD, op: 'Log in', form_id: 'user_login_form'}), {headers: {'Content-Type': "application/x-www-form-urlencoded"}} );
   } catch (e){
     console.log(e);
   }
