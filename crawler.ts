@@ -1,17 +1,13 @@
 import * as dotenv from 'dotenv';
 import axios from 'axios';
 import { default as cookieJarSupport} from 'axios-cookiejar-support';
-import {CookieJar} from 'tough-cookie';
 import { parse, HTMLElement } from 'node-html-parser';
 import * as htmlEntities from 'html-entities';
-import { readFileSync, writeFileSync } from 'fs';
 import {difference, groupBy, indexOf, map, union, uniq} from 'lodash';
-import {writeToStream} from "fast-csv";
-import * as fs from "fs";
+import {fetchCookieJar, login, storeCookieJar} from "./login";
+import {createHoversCSV, createHtmlCache, createLinksFile} from "./output";
 
 dotenv.config({path: 'config.env'});
-
-console.log(process.env.OMNIPEDIA_DATE);
 
 const client = axios.create({withCredentials:true});
 cookieJarSupport(client);
@@ -33,24 +29,17 @@ const isOmniLink = (a: OmniLink | OmniHoverInfo): a is OmniLink  => {
   return (<OmniLink>a).href !== undefined;
 }
 
-let visitedPages: string[] = []
+let visitedPages: string[] = [];
+let failedVisits: string[] = [];
 
 const crawl = async (): Promise<void> => {
-  let jar: CookieJar;
-  try {
-    jar = CookieJar.fromJSON(readFileSync('cookie.jar', {encoding: 'utf-8'}));
-  } catch (e) {
-    console.log(`Can't find cookie jar, creating a fresh one`);
-    console.log(e);
-    jar = new CookieJar();
-  }
+  const jar = fetchCookieJar();
   client.defaults.baseURL = 'https://omnipedia.app/'
   client.defaults.jar = jar;
   try {
-    await login(jar);
-    const omniDate = process.env.OMNIPEDIA_DATE;
-    console.log('Pulling the main page');
-    const hovers = await crawlPage(`/wiki/${omniDate}/Main_Page`, omniDate);
+    await login(client, jar);
+    console.log('Starting from the beginning of known history, the date in which Tony blessed us all with Omnipedia, 2049/09/28');
+    const hovers = await crawlPage(`/wiki/2049/09/28/Main_Page`);
 
     //Making an assumption that highlights don't change. Not seen a place where the highlight changes between terms so far.
     const groupedHovers = map(groupBy(hovers, 'highlight'), (group) => {
@@ -63,50 +52,79 @@ const crawl = async (): Promise<void> => {
 
     await createHoversCSV(groupedHovers);
     createLinksFile(visitedPages);
+    console.log('Failed to grab the following pages. Bug or legit? Only Tony knows for sure.')
+    console.log(failedVisits);
   } catch (e) {
     console.log(e.message);
     console.log('If this is a 404, somethings likely gone wrong logging you in')
     console.log('520 is cause Cloudflare doesnt like it when you spam requests lots of times in a row. Usually we get away with this cause it takes time to consume a page!')
   } finally {
-    writeFileSync('cookie.jar', JSON.stringify(jar.toJSON()));
+    storeCookieJar(jar);
   }
 }
 
-const login = async (jar: CookieJar): Promise<void> => {
-  try {
-    const omniCookies = await jar.getCookies('https://omnipedia.app/');
-    const expiry = omniCookies.filter(cookie => cookie.key.startsWith('SSESS')).map(cookie => cookie.expires);
-    if(expiry.length > 0){
-      const exp = expiry[0];
-      if(exp === 'Infinity') return; //The cookie will never expire. You're immortal!
-      if(Date.now() < exp.getTime()) return; //The cookie hasn't expired yet, you should be good to go.
-    }
-    console.log('Cookie not found, or expired. Fetching a new one.')
-    await client.post('/user/login', new URLSearchParams({name: process.env.OMNI_USERNAME, pass: process.env.OMNI_PASSWORD, op: 'Log in', form_id: 'user_login_form'}), {headers: {'Content-Type': "application/x-www-form-urlencoded"}} );
-  } catch (e){
-    console.log(e);
-  }
-}
-const crawlPage = async (page: string, omniDate: string): Promise<OmniHover[]> => {
+const crawlPage = async (page: string): Promise<OmniHover[]> => {
   if(indexOf(visitedPages, page) > 0){
     //Shortcircuit visited pages
     return [];
   }
   console.log(`Fetching ${page}`);
-  const result = await client.get(page);
-  visitedPages.push(page);
+  let result;
+  try {
+    result = await client.get(page);
+  } catch (e) {
+    failedVisits.push(page);
+    return [];
+  }
   const pageData = parse(result.data);
-  const content = pageData.querySelectorAll('a').map(a => parseAnchor(a)).filter(a => a)
-  let hovers = content.filter(a => !isOmniLink(a)).map(a => <OmniHover>{...a, page});
-  let foundLinks = content.filter(a => isOmniLink(a))
-    .filter(a => isContentLink(<OmniLink>a, omniDate))
-    .map(a => (<OmniLink>a).href);
-  foundLinks = difference(uniq(foundLinks), visitedPages);
+  createHtmlCache(result.data, page);
+  const allVersions = [...getOtherOmniDates(pageData)];
+  let [foundLinks, hovers] = parsePageVersion(pageData, page);
+  //This page is now harvested. Time to loop through all other versions of this page, and harvest those too.
+  for(const version of allVersions) {
+    console.log(`Fetching version ${version}`);
+    const versionResult = await client.get(version);
+    const versionData = parse(versionResult.data);
+    const [versionLinks, versionHovers] = parsePageVersion(versionData, version);
+    foundLinks = union(foundLinks, versionLinks);
+    hovers = union(hovers, versionHovers);
+    await sleep(500); //Lets try to reduce the 520ing
+  }
+  //One last check to make sure that all visited pages are out the foundLinks list
+  foundLinks = difference(foundLinks, visitedPages);
+  //Now we have a list of pages to visit that have appeared on this page!
+  console.log({visitedPages, foundLinks});
   for(const link of foundLinks) {
-    const childHovers = await crawlPage(link, omniDate);
+    const childHovers = await crawlPage(link);
     hovers = union(hovers, childHovers);
   }
   return hovers;
+}
+
+const parsePageVersion = (pageData, page): [string[], OmniHover[]] => {
+  visitedPages.push(page);
+  createHtmlCache(pageData, page);
+  let [foundLinks, hovers] = parsePageContent(pageData, page);
+  foundLinks = difference(uniq(foundLinks), visitedPages);
+  return [foundLinks, hovers];
+}
+
+const getOtherOmniDates = (pageData) => {
+  const versionDateLinks = pageData.querySelectorAll('.omnipedia-wiki-page-revisions__item > a').map(a => parseAnchor(a)).filter(a => a).reverse();
+  return versionDateLinks.filter(a => isOmniLink(a))
+    .filter(a => isContentLink(<OmniLink>a))
+    .map(a => (<OmniLink>a).href);
+}
+
+const parsePageContent = (pageData, page): [string[], OmniHover[]] => {
+
+  const content = pageData.querySelectorAll('a').map(a => parseAnchor(a)).filter(a => a);
+  let hovers = content.filter(a => !isOmniLink(a)).map(a => <OmniHover>{...a, page});
+  let foundLinks = content.filter(a => isOmniLink(a))
+    .filter(a => isContentLink(<OmniLink>a))
+    .map(a => (<OmniLink>a).href);
+
+  return [foundLinks, hovers];
 }
 
 const parseAnchor = (a: HTMLElement) : OmniLink | OmniHoverInfo | undefined => {
@@ -123,29 +141,14 @@ const parseAnchor = (a: HTMLElement) : OmniLink | OmniHoverInfo | undefined => {
   }
 }
 
-const isContentLink = (a: OmniLink, omniDate: string): boolean => {
-  return a.href?.includes(omniDate) && !a.href?.includes('Main_Page')
+const isContentLink = (a: OmniLink): boolean => {
+  return a.href?.startsWith('/wiki/') && !a.href?.includes('Special%3ARandom') && !a.href?.includes('/changes')
 }
 
-const createHoversCSV = (data) => {
-  return new Promise<void>((resolve, reject) => {
-    const outPath = `./${process.env.OMNIPEDIA_DATE.replace(/\//g,`_`)}__hovers.csv`;
-    const ws = fs.createWriteStream(outPath);
-    ws.on('error', reject);
-    ws.on('finish', () => {
-      console.log(`Finished writing hovers to ${outPath}`);
-      resolve();
-    });
-    writeToStream(ws, data, {headers: ['highlight', 'body', 'pages'], delimiter: '\t'})
-      .on('error', err => reject(err))
-      .on('finish', () => ws.end());
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
   });
-}
-
-const createLinksFile = (data) => {
-  const outPath = `./${process.env.OMNIPEDIA_DATE.replace(/\//g,`_`)}__links.csv`;
-  fs.writeFileSync(outPath, data.join('\n'));
-  console.log(`Finished writing links to ${outPath}`);
 }
 
 (async () => await crawl())();
