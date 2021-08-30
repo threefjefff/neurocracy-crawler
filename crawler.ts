@@ -142,7 +142,7 @@ const parseAnchor = (a: HTMLElement) : OmniLink | OmniHoverInfo | undefined => {
 }
 
 const isContentLink = (a: OmniLink): boolean => {
-  return a.href?.startsWith('/wiki/') && !a.href?.includes('Special%3ARandom') && !a.href?.includes('/changes')
+  return a.href?.startsWith('/wiki/') && !a.href?.includes('Special%3ARandom') && !a.href?.includes('/changes') && !a.href?.includes('File%3')
 }
 
 function sleep(ms) {
